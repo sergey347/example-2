@@ -1,0 +1,348 @@
+<?php
+
+/**
+ * @file
+ * Backflow Mail Lists module.
+ */
+
+include_once 'includes/bf_mail_lists.admin.inc';
+
+define('BF_MAIL_LISTS_NO_RETEST_DATE', 'No re-test date available');
+define('BF_MAIL_LISTS_NO_DUE_DATE', 'No due-date available');
+
+define('BF_MAIL_LISTS_ITEMS_PER_OPERATION', 25);
+
+/**
+ * Implements hook_menu().
+ */
+function bf_mail_lists_menu() {
+  $items = [];
+
+  $items['settings/admin/mail-lists'] = [
+    'title' => 'Mail lists',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => ['bf_mail_lists_form'],
+    'access arguments' => ['administer device settings'],
+    'file' => 'includes/bf_mail_lists.admin.inc',
+    'type' => MENU_CALLBACK,
+  ];
+
+  $items['create-list/%ctools_js/%'] = [
+    'title' => 'Create List',
+    'page callback' => 'bf_mail_lists_create_list_callback',
+    'page arguments' => [1, 2],
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  ];
+
+  return $items;
+}
+
+/**
+ * Implements hook_crm_settings_menubar_alter().
+ */
+function bf_mail_lists_crm_settings_menubar_alter(&$list) {
+  $list['admin']['sub']['mail-lists'] = [
+    'title' => t('Mail lists'),
+    'link' => 'settings/admin/mail-lists',
+    'access' => 'administer device entities',
+    'weight' => 9,
+  ];
+}
+
+/**
+ * Ajax menu callback.
+ */
+function bf_mail_lists_create_list_callback($ajax, $type) {
+  if ($ajax) {
+    ctools_include('ajax');
+    ctools_include('modal');
+
+    $form_state = [
+      'ajax' => TRUE,
+      'title' => t('List parameters'),
+      'list_type' => $type,
+    ];
+
+    // Use ctools to generate ajax instructions for the browser to create
+    // a form in a modal popup.
+    $output = ctools_modal_form_wrapper('bf_mail_lists_modal_form', $form_state);
+
+    // If the form has been submitted, there may be additional instructions
+    // such as dismissing the modal popup.
+    if (!empty($form_state['ajax_commands'])) {
+      $output = $form_state['ajax_commands'];
+    }
+
+    print ajax_render($output);
+    drupal_exit();
+  }
+  else {
+    return drupal_get_form('bf_mail_lists_modal_form', $type);
+  }
+}
+
+/**
+ * Modal form aimed to enter List title and a user to assign a List.
+ */
+function bf_mail_lists_modal_form($form, $form_state, $type = NULL) {
+  $list_type = empty($type) ? $form_state['list_type'] : $type;
+  $machine_name = $ui_name = '';
+
+  if ($list_type == 'stand-alone') {
+    $machine_name = 'stand_alone';
+    $ui_name = 'Stand Alone';
+  }
+  else {
+    $machine_name = 'third_party';
+    $ui_name = '3rd Party';
+  }
+
+  $form = [];
+  $form["{$machine_name}_list_name"] = [
+    '#type' => 'textfield',
+    '#title' => t("$ui_name list name"),
+    '#required' => TRUE,
+  ];
+
+  // "Assign a list to" select.
+  $roles = crm_lead_creator_get_roles_ids();
+
+  $query = db_select('users', 'u');
+  $query->fields('u', ['uid', 'name']);
+  $query->leftJoin('users_roles', 'r', 'u.uid = r.uid');
+  $query->condition('u.status', 1);
+  $query->condition('r.rid', $roles, 'IN');
+  $query->orderBy('u.name');
+  $users = $query->execute()->fetchAllKeyed();
+
+  $form["assign_{$machine_name}_list_to_user"] = [
+    '#title' => t('Assign a list to'),
+    '#type' => 'select',
+    '#options' => $users,
+    '#empty_value' => 0,
+    '#empty_option' => t('-- Viewable to all --'),
+  ];
+
+  $form['submit'] = [
+    '#type' => 'submit',
+    '#value' => t("Create $ui_name list"),
+  ];
+
+  return $form;
+}
+
+/**
+ * Modal form submit handler. Create a List.
+ */
+function bf_mail_lists_modal_form_submit(&$form, &$form_state) {
+  $type = $form_state['list_type'] ?: $form_state['build_info']['args'][0];
+
+  switch ($type) {
+    case 'stand-alone':
+      $machine_name = 'stand_alone';
+      $term = taxonomy_get_term_by_name(BF_MAIL_LISTS_NO_RETEST_DATE, 'tags');
+      $tid = key($term);
+      break;
+
+    case 'third-party':
+      $machine_name = 'third_party';
+      $term = taxonomy_get_term_by_name(BF_MAIL_LISTS_NO_DUE_DATE, 'tags');
+      $tid = key($term);
+      break;
+  }
+
+  $filter = [
+    'update_filter' => -1,
+    'count_filter' => 1,
+    'remove_filter' => -1,
+    0 => [
+      'field_type' => 'entity',
+      'property' => 'field_tags',
+      'operation' => '=',
+      'val' => $tid,
+    ],
+  ];
+
+  $ids = variable_get("bf_mail_lists_{$machine_name}_processed");
+  $values = [];
+
+  foreach ($ids as $key => $id) { $values[$key]['target_id'] = $id; }
+
+  $list = [];
+  $list['title']     = $form_state['values']["{$machine_name}_list_name"];
+  $list['type']      = 'organization';
+  $list['uid']       = $form_state['values']["assign_{$machine_name}_list_to_user"];
+  $list['filter']    = serialize($filter);
+  $list['status']    = 1;
+  $list['exclude']   = 0;
+  $list['timestamp'] = REQUEST_TIME;
+
+  $list_entity = entity_create('dialer_list', $list);
+  $list_entity->field_list_contact[LANGUAGE_NONE] = $values;
+  $list_entity->save();
+
+  $list_id = $list_entity->identifier();
+
+  if ($list_id) {
+    $pure_link = "dialer-list/$list_id";
+
+    if ($form_state['ajax']) {
+      $form_state['ajax_commands'][] = ctools_modal_command_dismiss();
+
+      $link = l($list['title'], $pure_link);
+      $msg = t("List !link was created successfully!", ['!link' => $link]);
+      $msg = "<div class='msg-wrapper'>$msg</div>";
+      $form_state['ajax_commands'][] = ajax_command_append('.bf-mail-lists-status', $msg);
+    }
+    else {
+      $form_state['redirect'] = $pure_link;
+    }
+  }
+}
+
+/**
+ * Implements hook_field_attach_update().
+ * Acts on WO creation when devices has been updated.
+ *
+ * @see bf_workorder_form_submit()
+ */
+function bf_mail_lists_field_attach_update($entity_type, $entity) {
+  if ($entity_type == 'bf_device' && $entity->bundle() == 'bf_device') {
+    bf_mail_lists_update_contact_by_device($entity);
+  }
+}
+
+/**
+ * Updated Contact`s tags if all of devices has test/re-test date or due date.
+ */
+function bf_mail_lists_update_contact_by_device($device_entity) {
+  $save = FALSE;
+
+  $device_wrapper = $device_entity->wrapper();
+  $device_id = $device_wrapper->getIdentifier();
+
+  $contact = $device_wrapper->get('field_device_company')->value();
+  $contact_id = $contact->identifier();
+
+  // Check 'NO_TEST_DATE' tag.
+  $other_test_date_are_filled = bf_mail_lists_check_other_are_filled(
+    $contact_id,
+    $device_id,
+    BF_MAIL_LISTS_NO_RETEST_DATE
+  );
+
+  $re_test_date = $device_wrapper->get('field_device_re_test_date')->value();
+  $test_date = $device_wrapper->get('field_device_test_date')->value();
+  $current_test_date_is_filled = ($re_test_date || $test_date);
+
+  if ($other_test_date_are_filled && $current_test_date_is_filled) {
+    // Get term.
+    $term = taxonomy_get_term_by_name(BF_MAIL_LISTS_NO_RETEST_DATE, 'tags');
+    $term = array_values($term);
+    $no_retest_term = $term[0];
+
+    $current_terms = field_get_items('crm_core_contact', $contact, 'field_tags');
+
+    // Check whether it`s in field.
+    $tag = bf_mail_lists_tag_checker($current_terms, $no_retest_term);
+
+    // Remove tag from field_tags.
+    if ($tag['tag_persist']) {
+      unset($current_terms[$tag['delta']]);
+      $contact->field_tags[LANGUAGE_NONE] = $current_terms;
+      $save = TRUE;
+    }
+  }
+
+  // Check 'NO_DUE_DATE' tag.
+  $other_due_date_are_filled = bf_mail_lists_check_other_are_filled(
+    $contact_id,
+    $device_id,
+    BF_MAIL_LISTS_NO_DUE_DATE
+  );
+
+  $current_due_date_is_filled = $device_wrapper->get('field_device_dob')->value();
+
+  if ($other_due_date_are_filled && $current_due_date_is_filled) {
+    // Get term.
+    $term = taxonomy_get_term_by_name(BF_MAIL_LISTS_NO_DUE_DATE, 'tags');
+    $term = array_values($term);
+    $no_due_term = $term[0];
+
+    $current_terms = field_get_items('crm_core_contact', $contact, 'field_tags');
+
+    // Check whether it`s in field.
+    $tag = bf_mail_lists_tag_checker($current_terms, $no_due_term);
+
+    // Remove tag from field_tags.
+    if ($tag['tag_persist']) {
+      unset($current_terms[$tag['delta']]);
+      $contact->field_tags[LANGUAGE_NONE] = $current_terms;
+      $save = TRUE;
+    }
+  }
+
+  // Save updated Contact.
+  if ($save) {
+    field_attach_update('crm_core_contact', $contact);
+    entity_get_controller('crm_core_contact')->resetCache([$contact_id]);
+    search_api_track_item_change('crm_core_contact', [$contact_id]);
+  }
+}
+
+/**
+ * Check whether tag already persist in a field.
+ */
+function bf_mail_lists_tag_checker($current_terms, $no_retest_term) {
+  $tag = [
+    'tag_persist' => FALSE,
+    'delta' => 'undefined',
+  ];
+
+  foreach ($current_terms as $delta => $current_term) {
+    if ($no_retest_term->tid == $current_term['tid']) {
+      $tag['tag_persist'] = TRUE;
+      $tag['delta'] = $delta;
+      break;
+    }
+  }
+
+  return $tag;
+}
+
+/**
+ * Check whether other devices that belongs to current Contact
+ * have filled test/re-test date.
+ *
+ * @return TRUE - do not have, FALSE otherwise.
+ */
+function bf_mail_lists_check_other_are_filled($contact_id, $device_id, $tag_type) {
+  $query = db_select('bf_device', 'bfd');
+  $query->fields('bfd', ['device_id']);
+
+  $query->join('field_data_field_device_company', 'fdc', 'bfd.device_id = fdc.entity_id');
+  $query->join('crm_core_contact', 'ccc', 'fdc.field_device_company_target_id = ccc.contact_id');
+
+  switch ($tag_type) {
+    case BF_MAIL_LISTS_NO_RETEST_DATE:
+      $query->leftJoin('field_data_field_device_test_date', 'ftd', 'ftd.entity_id = bfd.device_id');
+      $query->leftJoin('field_data_field_device_re_test_date', 'frtd', 'frtd.entity_id = bfd.device_id');
+
+      $query->isNull('ftd.field_device_test_date_value');
+      $query->isNull('frtd.field_device_re_test_date_value');
+      break;
+
+    case BF_MAIL_LISTS_NO_DUE_DATE:
+      $query->leftJoin('field_data_field_device_dob', 'dob', 'dob.entity_id = bfd.device_id');
+      $query->isNull('dob.field_device_dob_value');
+      break;
+  }
+
+  $query->condition('ccc.contact_id', $contact_id);
+  $query->condition('bfd.device_id', $device_id,'<>');
+
+  $rowCount = $query->execute()->rowCount();
+
+  return empty($rowCount);
+}

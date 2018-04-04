@@ -1,0 +1,61 @@
+<?php
+
+/**
+ * @file
+ * Install, update and uninstall functions for the bf_mail_lists module.
+ */
+
+/**
+ * Implements hook_install().
+ */
+function bf_mail_lists_install() {
+  // Create tags for vocabulary.
+  $vocab = taxonomy_vocabulary_machine_name_load('tags');
+  $vid = $vocab->vid;
+
+  // Create parent term.
+  $term = new \stdClass();
+  $term->vid = $vid;
+  $term->name = 'Mailing Flow';
+  $term->description = '';
+  $term->format = 'editor';
+  taxonomy_term_save($term);
+
+  // Create child terms.
+  $parent = taxonomy_get_term_by_name('Mailing Flow', 'tags');
+  $parent = array_values($parent);
+  $child_terms = [BF_MAIL_LISTS_NO_RETEST_DATE, BF_MAIL_LISTS_NO_DUE_DATE];
+
+  foreach ($child_terms as $key => $name) {
+    $term = new \stdClass();
+    $term->vid = $vid;
+    $term->name = $name;
+    $term->description = '';
+    $term->format = 'editor';
+    $term->weight = $key;
+    $term->parent = $parent[0]->tid;
+    taxonomy_term_save($term);
+  }
+
+  // Update cities without city_type.
+  $sd_ids = db_select('bf_submission_detail', 'bfs')
+    ->fields('bfs', ['sdid'])
+    ->condition('city_type', NULL, 'IS')
+    ->condition('irrigation', NULL, 'IS')
+    ->execute()->fetchcol();
+
+  $fields = [
+    'city_type' => 1,
+    'irrigation' => 0,
+  ];
+
+  $num_updated = db_update('bf_submission_detail')
+    ->fields($fields)
+    ->condition('city_type', NULL, 'IS')
+    ->condition('irrigation', NULL, 'IS')
+    ->execute();
+
+  $msg = "bf_submission_detail table was updated. Total updated rows: $num_updated. ";
+  $msg .= 'Ids: ' . var_export($sd_ids, TRUE);
+  watchdog('bf_mail_lists', $msg);
+}

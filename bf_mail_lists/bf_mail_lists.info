@@ -1,0 +1,6 @@
+name = Backflow Mail Lists
+description = Provide UI interface to create mailing lists for organizations without "test/re-test date", "due-date" or marked as "irrigation".
+package = Backflow Custom
+core = 7.x
+
+dependencies[] = ctools
